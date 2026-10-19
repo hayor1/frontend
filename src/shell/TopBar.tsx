@@ -1,16 +1,18 @@
 'use client'
 
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import dynamic from 'next/dynamic'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useTranslations } from 'next-intl'
-import { Button, useToast } from '../components'
+import { Button, TransactionsDrawer, useToast } from '../components'
 import { useLocaleSwitcher } from '../i18n/LocaleProvider'
-import { LOCALE_LABELS, type Locale } from '../i18n/config'
+import { LOCALE_LABELS, LOCALE_NAMES, type Locale } from '../i18n/config'
 import { useWallet, shortAddress } from '../wallet/WalletProvider'
+import { useTransactions } from '../wallet/TransactionsProvider'
 import { useTheme } from '../theme/ThemeProvider'
-import { HORIZON_URL, NETWORK_PASSPHRASE, networkLabel } from '../config/network'
+import { NETWORK_PASSPHRASE, networkLabel, getExplorerAccountUrl } from '../config/network'
+import { useHorizonHealth } from '../hooks/useHorizonHealth'
 import { networkMismatchMessage } from '../wallet/networkGuard'
 
 /** "Testnet", "Standalone", … — shown as a persistent pill on non-mainnet builds (#611). */
@@ -22,8 +24,8 @@ const Mark = dynamic(() => import('../brand/Mark').then((m) => m.Mark), {
 
 /**
  * TopBar — persistent nav rendered by the root layout. Analemma mark + Explore /
- * How it works / Learn / Creator, network status dot, theme toggle, language
- * switcher, Connect (or the connected wallet pill). Active state derives from the
+ * How it works / Learn / Creator, network status dot, preferences menu (theme +
+ * language), Connect (or the connected wallet pill). Active state derives from the
  * route (and a scroll-spy for the landing anchors); connection from the wallet.
  */
 const NAV = [
@@ -49,61 +51,36 @@ export function TopBar() {
     walletNetworkPassphrase,
     checkWalletNetwork,
   } = useWallet()
-  const { theme, toggle } = useTheme()
+  const { pendingCount, transactions } = useTransactions()
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const mobileMenuButtonRef = useRef<HTMLButtonElement>(null)
+  const closeDrawer = useCallback(() => setDrawerOpen(false), [])
 
-  const [networkOnline, setNetworkOnline] = useState(true)
+  const { isOnline: networkOnline } = useHorizonHealth()
 
   useEffect(() => {
     router.prefetch('/connect')
   }, [router])
 
   useEffect(() => {
-    let cancelled = false
-    let currentController: AbortController | undefined
+    // The route is an external navigation signal; close the transient menu
+    // after navigation so it cannot remain open over the next page.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setMobileMenuOpen(false)
+  }, [pathname])
 
-    const check = async () => {
-      if (!navigator.onLine) {
-        if (!cancelled) setNetworkOnline(false)
-        return
-      }
-      const controller = new AbortController()
-      currentController = controller
-      const timeoutId = setTimeout(() => controller.abort(), 3000)
-      try {
-        const res = await fetch(HORIZON_URL, {
-          signal: controller.signal,
-          cache: 'no-store',
-        })
-        if (!cancelled) setNetworkOnline(res.ok || res.status < 500)
-      } catch {
-        if (!cancelled) setNetworkOnline(false)
-      } finally {
-        clearTimeout(timeoutId)
+  useEffect(() => {
+    if (!mobileMenuOpen) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMobileMenuOpen(false)
+        mobileMenuButtonRef.current?.focus()
       }
     }
-
-    const handleOnline = () => {
-      void check()
-    }
-    const handleOffline = () => {
-      currentController?.abort()
-      if (!cancelled) setNetworkOnline(false)
-    }
-
-    window.addEventListener('online', handleOnline)
-    window.addEventListener('offline', handleOffline)
-    void check()
-    const interval = setInterval(() => {
-      void check()
-    }, 15000)
-    return () => {
-      cancelled = true
-      clearInterval(interval)
-      window.removeEventListener('online', handleOnline)
-      window.removeEventListener('offline', handleOffline)
-      currentController?.abort()
-    }
-  }, [])
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [mobileMenuOpen])
 
   // Theme state starts 'light' on server/first render (to avoid a hydration
   // mismatch), so the toggle icon can't be trusted until after mount — a
@@ -138,32 +115,10 @@ export function TopBar() {
     return () => observer.disconnect()
   }, [pathname])
 
-  const isDarkTheme = mounted && theme === 'dark'
-  const themeToggleLabel = isDarkTheme ? t('switchToLight') : t('switchToDark')
-
   return (
     <>
-      <header
-        style={{
-          position: 'sticky',
-          top: 0,
-          zIndex: 200,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 28,
-          padding: '0 32px',
-          height: 68,
-          background: 'color-mix(in srgb, var(--canvas) 86%, transparent)',
-          backdropFilter: 'saturate(140%) blur(12px)',
-          WebkitBackdropFilter: 'saturate(140%) blur(12px)',
-          borderBottom: '1px solid var(--ink-12)',
-        }}
-      >
-        <Link
-          href="/"
-          aria-label="Heliobond — home"
-          style={{ display: 'flex', alignItems: 'center', gap: 10, textDecoration: 'none' }}
-        >
+      <header className="hb-topbar">
+        <Link href="/" aria-label="Heliobond — home" className="hb-topbar__home">
           {mounted && pathname === '/' ? <Mark /> : null}
           <span
             style={{
@@ -178,7 +133,7 @@ export function TopBar() {
           </span>
         </Link>
 
-        <nav className="hb-topbar-nav" style={{ display: 'flex', gap: 4, marginInlineStart: 8 }}>
+        <nav className="hb-topbar-nav hb-topbar__nav">
           {NAV.map(({ href, key }) => {
             const active = href.includes('#')
               ? pathname === '/' && activeHash === href.slice(href.indexOf('#'))
@@ -204,7 +159,7 @@ export function TopBar() {
           })}
         </nav>
 
-        <div style={{ marginInlineStart: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div className="hb-topbar__actions">
           <NetworkPill passphrase={NETWORK_PASSPHRASE} />
 
           <span
@@ -235,18 +190,47 @@ export function TopBar() {
             {networkOnline ? null : 'Offline'}
           </span>
 
-          <button
-            type="button"
-            onClick={toggle}
-            aria-label={themeToggleLabel}
-            aria-pressed={mounted ? isDarkTheme : undefined}
-            title={themeToggleLabel}
-            style={iconBtnStyle}
-          >
-            {mounted ? isDarkTheme ? <SunIcon /> : <MoonIcon /> : null}
-          </button>
+          <PreferencesDropdown />
 
-          <LocaleDropdown />
+          {(connected || transactions.length > 0) && (
+            <button
+              type="button"
+              onClick={() => setDrawerOpen(true)}
+              aria-label="Transaction activity history"
+              title="Transaction activity history"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '6px 12px',
+                borderRadius: 'var(--radius-pill)',
+                border:
+                  pendingCount > 0
+                    ? '1px solid rgba(59, 130, 246, 0.4)'
+                    : '1px solid var(--ink-12)',
+                background: pendingCount > 0 ? 'rgba(59, 130, 246, 0.1)' : 'var(--surface)',
+                color: pendingCount > 0 ? '#3b82f6' : 'var(--ink)',
+                fontFamily: 'var(--font-data)',
+                fontSize: 'var(--type-caption)',
+                fontWeight: 600,
+                cursor: 'pointer',
+                transition: 'all var(--dur-press) var(--ease-out)',
+              }}
+            >
+              {pendingCount > 0 && (
+                <span
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    background: '#3b82f6',
+                    animation: 'hb-pulse 1.4s ease-in-out infinite',
+                  }}
+                />
+              )}
+              {pendingCount > 0 ? `${pendingCount} Pending` : 'Activity'}
+            </button>
+          )}
 
           {connected && address ? (
             <WalletMenu
@@ -265,6 +249,37 @@ export function TopBar() {
             </Button>
           )}
         </div>
+
+        <button
+          ref={mobileMenuButtonRef}
+          type="button"
+          className="hb-mobile-menu-button"
+          aria-label="Open site menu"
+          aria-expanded={mobileMenuOpen}
+          aria-controls="mobile-site-menu"
+          onClick={() => setMobileMenuOpen((open) => !open)}
+        >
+          Menu
+        </button>
+
+        {mobileMenuOpen && (
+          <div id="mobile-site-menu" className="hb-mobile-menu-panel" role="menu">
+            {NAV.map(({ href, key }) => (
+              <Link
+                key={key}
+                href={href}
+                role="menuitem"
+                onClick={() => setMobileMenuOpen(false)}
+                className="hb-mobile-menu-link"
+              >
+                {t(key)}
+              </Link>
+            ))}
+            <PreferencesDropdown />
+          </div>
+        )}
+
+        <TransactionsDrawer open={drawerOpen} onClose={closeDrawer} />
       </header>
       {!networkOnline && (
         <div
@@ -378,12 +393,21 @@ const iconBtnStyle = {
   color: 'var(--ink-60)',
 } as const
 
-function LocaleDropdown() {
+function PreferencesDropdown() {
   const t = useTranslations('Nav')
   const { locale, switchLocale } = useLocaleSwitcher()
+  const { theme, toggle } = useTheme()
+  // Theme state starts 'light' on server/first render (to avoid a hydration
+  // mismatch), so the theme label can't be trusted until after mount.
+  const [mounted, setMounted] = useState(false)
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => setMounted(true), [])
+  const isDarkTheme = mounted && theme === 'dark'
+  const themeToggleLabel = isDarkTheme ? t('switchToLight') : t('switchToDark')
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
 
   useEffect(() => {
     if (!open) return
@@ -396,19 +420,40 @@ function LocaleDropdown() {
 
   useEffect(() => {
     if (open) {
-      setTimeout(() => {
-        const items = ref.current?.querySelectorAll<HTMLElement>('[role="menuitem"]')
-        items?.[0]?.focus()
-      }, 0)
+      const timer = setTimeout(() => itemRefs.current[0]?.focus(), 0)
+      return () => clearTimeout(timer)
     }
   }, [open])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
+    const items = itemRefs.current.filter((el): el is HTMLButtonElement => el !== null)
+    if (!items.length) return
+    const focused = document.activeElement
+    const idx = items.indexOf(focused as HTMLButtonElement)
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      items[(idx + 1) % items.length].focus()
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      items[(idx - 1 + items.length) % items.length].focus()
+    } else if (e.key === 'Home') {
+      e.preventDefault()
+      items[0].focus()
+    } else if (e.key === 'End') {
+      e.preventDefault()
+      items[items.length - 1].focus()
+    } else if (e.key === 'Escape') {
       setOpen(false)
       triggerRef.current?.focus()
+    } else if (e.key === 'Tab') {
+      setOpen(false)
     }
   }
+
+  // Reset item refs array before each render
+  // eslint-disable-next-line react-hooks/refs
+  itemRefs.current = []
 
   return (
     <div ref={ref} style={{ position: 'relative' }}>
@@ -418,19 +463,11 @@ function LocaleDropdown() {
         onClick={() => setOpen((o) => !o)}
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={t('language')}
-        style={{
-          ...iconBtnStyle,
-          width: 'auto',
-          gap: 5,
-          padding: '0 6px',
-          fontFamily: 'var(--font-body)',
-          fontSize: 14,
-          color: 'var(--ink-60)',
-        }}
+        aria-label={t('preferences')}
+        title={t('preferences')}
+        style={iconBtnStyle}
       >
-        {LOCALE_LABELS[locale]}
-        <ChevronDown />
+        <SettingsIcon />
       </button>
 
       {open && (
@@ -442,7 +479,7 @@ function LocaleDropdown() {
             position: 'absolute',
             top: 48,
             insetInlineEnd: 0,
-            minWidth: 120,
+            minWidth: 200,
             background: 'var(--surface)',
             border: '1px solid var(--ink-12)',
             borderRadius: 'var(--radius-card)',
@@ -451,10 +488,62 @@ function LocaleDropdown() {
             zIndex: 400,
           }}
         >
+          <button
+            ref={(el) => {
+              itemRefs.current.push(el)
+            }}
+            role="menuitemcheckbox"
+            aria-checked={isDarkTheme}
+            tabIndex={-1}
+            type="button"
+            onClick={toggle}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 10,
+              width: '100%',
+              textAlign: 'start',
+              border: 'none',
+              cursor: 'pointer',
+              padding: '9px 10px',
+              borderRadius: 'var(--radius-input)',
+              fontFamily: 'var(--font-body)',
+              fontSize: 14,
+              fontWeight: 500,
+              color: 'var(--ink-60)',
+              background: 'transparent',
+            }}
+          >
+            {themeToggleLabel}
+            {mounted ? isDarkTheme ? <SunIcon /> : <MoonIcon /> : null}
+          </button>
+          <div
+            role="separator"
+            style={{ height: 1, background: 'var(--ink-12)', margin: '6px 0' }}
+          />
+          <div
+            role="presentation"
+            style={{
+              padding: '4px 10px',
+              fontFamily: 'var(--font-data)',
+              fontSize: 11,
+              fontWeight: 600,
+              letterSpacing: '0.06em',
+              textTransform: 'uppercase',
+              color: 'var(--ink-40)',
+            }}
+          >
+            {t('language')}
+          </div>
           {(Object.keys(LOCALE_LABELS) as Locale[]).map((code) => (
             <button
               key={code}
-              role="menuitem"
+              ref={(el) => {
+                itemRefs.current.push(el)
+              }}
+              role="menuitemradio"
+              aria-checked={code === locale}
               tabIndex={-1}
               type="button"
               onClick={() => {
@@ -476,7 +565,7 @@ function LocaleDropdown() {
                 background: 'transparent',
               }}
             >
-              {LOCALE_LABELS[code]}
+              <span lang={code}>{LOCALE_NAMES[code]}</span>
             </button>
           ))}
         </div>
@@ -485,12 +574,12 @@ function LocaleDropdown() {
   )
 }
 
-function ChevronDown() {
+function SettingsIcon() {
   return (
     <svg
       viewBox="0 0 24 24"
-      width="14"
-      height="14"
+      width="18"
+      height="18"
       fill="none"
       stroke="currentColor"
       strokeWidth="1.5"
@@ -498,7 +587,8 @@ function ChevronDown() {
       strokeLinejoin="round"
       aria-hidden="true"
     >
-      <path d="m6 9 6 6 6-6" />
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
     </svg>
   )
 }
@@ -560,6 +650,14 @@ function WalletMenu({
 
   const [open, setOpen] = useState(false)
   const [confirming, setConfirming] = useState(false)
+
+  // Closing the menu resets the confirm step. Adjusting during render is React's
+  // sanctioned way to reset state for a changed prop (#598).
+  const [wasMenuOpen, setWasMenuOpen] = useState(false)
+  if (wasMenuOpen !== open) {
+    setWasMenuOpen(open)
+    if (!open) setConfirming(false)
+  }
   const [copied, setCopied] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -591,19 +689,18 @@ function WalletMenu({
   }, [open])
 
   useEffect(() => {
-    if (!open) {
-      setConfirming(false)
-      if (cancelTimerRef.current) {
-        clearTimeout(cancelTimerRef.current)
-        cancelTimerRef.current = null
+    if (open) {
+      const onDown = (e: MouseEvent) => {
+        if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
       }
-      return
+      document.addEventListener('mousedown', onDown)
+      return () => document.removeEventListener('mousedown', onDown)
     }
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    // Closing cancels a pending confirm-reset so it cannot fire on a later open.
+    if (cancelTimerRef.current) {
+      clearTimeout(cancelTimerRef.current)
+      cancelTimerRef.current = null
     }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
   }, [open])
 
   const copy = async () => {
@@ -808,7 +905,7 @@ function WalletMenu({
               ref={(el) => {
                 itemRefs.current.push(el)
               }}
-              href={`https://stellar.expert/explorer/testnet/account/${address}`}
+              href={getExplorerAccountUrl(address)}
             >
               {t('viewOnExplorer')}
             </MenuLink>
